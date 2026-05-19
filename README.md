@@ -1,117 +1,92 @@
 # virustotal-md5-batch-search
 
-A two-stage Python tool for batch-searching MD5 hashes against VirusTotal and extracting detailed metadata for files found in the database. Designed for the **VirusTotal free API tier** with built-in rate limiting (4 requests/minute).
+A three-stage Python tool for batch-searching MD5 hashes against VirusTotal, extracting detailed file metadata, and hunting for the actual files across public sources. Designed for the **VirusTotal free API tier** with built-in rate limiting.
 
-## Features
+## Stages
 
-**Stage 1 — Initial Scan**
-- Batch-search MD5 hashes against VirusTotal
-- Identify which hashes are in the database vs. not found
-- Flag malicious vs. clean files
-- Export results to timestamped JSON
+**Stage 1 — Hash Scan**
+Query a list of MD5 hashes against VirusTotal. Identifies which hashes exist in the database, flags malicious vs. clean, and exports results to JSON.
 
-**Stage 2 — Detailed Analysis**
-- Reads Stage 1 output and fetches deeper info for found hashes only
-- Extracts: basic properties, history, names, execution parents
-- Uses SHA-256 from Stage 1 to query the `execution_parents` endpoint
-- Export detailed metadata to timestamped JSON
+**Stage 2 — Metadata Extraction**
+Takes Stage 1 output and fetches deep metadata for confirmed hashes — basic properties, submission history, alternate names, and execution parents (the archives and installers the file has been observed inside).
+
+**Stage 3 — File Hunter**
+Takes Stage 2 output and attempts to locate and download the actual files. Searches Internet Archive collections, Hugging Face datasets, GitHub (code search + direct Contents API on known repos), and Hybrid Analysis. Walks nested archives up to 6 layers deep (ZIP, RAR, 7z) and verifies every candidate by hash before keeping it. Also scans all extracted files against the full Stage 1 hash list as a bonus pass.
 
 ## Requirements
 
-- Python 3.7+
-- `requests` library
-- VirusTotal API key (free tier works — get one at https://www.virustotal.com/gui/my-apikey)
-
 ```bash
-pip install requests
+pip install requests rarfile py7zr python-magic
+# Linux: sudo apt install unrar
+# Mac:   brew install unrar
 ```
+
+- Python 3.8+
+- VirusTotal API key — [free tier](https://www.virustotal.com/gui/my-apikey)
+- GitHub personal access token — required for Stage 3
+- Hybrid Analysis API key — optional for Stage 3
+
+## Configuration
+
+Place a `config.txt` file in the same directory as the script. It is loaded automatically on startup. Any credentials found there skip their prompts.
+
+```
+[virustotal api]
+your_vt_api_key
+
+[github token]
+your_github_token
+
+[hybrid analysis api]
+your_hybrid_key
+
+[blocklist]
+libretro/libretro-database
+mamedev/mame
+
+[known_binaries]
+Abdess/retrobios
+archtaurus/RetroPieBIOS
+
+[md5s]
+042a0adecf2d616ccfb915a5cd71fde5
+06dd41b614a6d6d079ec1ee73e2bf87d
+```
+
+**Sections:**
+- `[virustotal api]` / `[github token]` / `[hybrid analysis api]` — credentials
+- `[blocklist]` — `owner/repo` pairs that GitHub code search should never download from (e.g. hash database repos that reference filenames in text rather than containing the actual files)
+- `[known_binaries]` — repos walked via the GitHub Contents API to find actual binary files by name
+- `[md5s]` — hash list for Stage 1 (one per line)
+
+All sections are optional. A plain file of MD5s with no section headers also works.
 
 ## Usage
 
 ```bash
-python virustotal_batch_search.py
+python virustotal_md5_batch_search.py
 ```
 
-You'll be prompted for:
-1. Your VirusTotal API key
-2. Stage selection (1 or 2)
-3. Input source:
-   - **Stage 1**: file path with MD5s (one per line) OR comma-separated MD5s
-   - **Stage 2**: path to a Stage 1 JSON output file
+Select a stage at the menu. Stages chain automatically — after Stage 1 completes you can continue straight to Stage 2, then Stage 3, without re-entering credentials or file paths.
 
-### Example workflow
+Running Stage 3 standalone prompts for the Stage 2 JSON path and optionally a Stage 1 hash list for the extended scan.
 
-```bash
-# Stage 1: scan a list of MD5s
-$ python virustotal_batch_search.py
-# Select 1, provide hashes.txt
-# Output: virustotal_results_YYYYMMDD_HHMMSS.json
+## Output
 
-# Stage 2: get details on the hashes that were found
-$ python virustotal_batch_search.py
-# Select 2, provide the Stage 1 JSON path
-# Output: virustotal_detailed_analysis_YYYYMMDD_HHMMSS.json
-```
+All output files are written to the script directory.
 
-## Output Structure
+| File | Stage |
+|---|---|
+| `virustotal_results_{timestamp}.json` | Stage 1 |
+| `virustotal_detailed_analysis_{timestamp}.json` | Stage 2 |
+| `stage3_report_{timestamp}.json` | Stage 3 |
+| `found/{md5}.{ext}` | Stage 3 verified files |
 
-### Stage 1 JSON
-```json
-{
-  "timestamp": "...",
-  "total_hashes_searched": 40,
-  "in_virustotal_database": {
-    "count": 10,
-    "malicious": 0,
-    "clean": 10
-  },
-  "not_in_virustotal_database": 30,
-  "errors": 0,
-  "results": {
-    "<md5>": {
-      "found": true,
-      "malicious": false,
-      "error": null
-    }
-  }
-}
-```
-
-### Stage 2 JSON
-```json
-{
-  "details": {
-    "<md5>": {
-      "basic_properties": {
-        "md5", "sha256", "sha1", "file_type", "magic", "size_bytes"
-      },
-      "history": {
-        "first_seen_itw", "first_submission", "last_submission", "last_analysis"
-      },
-      "names": ["...", "..."],
-      "execution_parents": [
-        {
-          "type", "name", "sha256", "size",
-          "first_submission", "last_analysis", "detections"
-        }
-      ]
-    }
-  }
-}
-```
+Stage 3 uses a hard **3 GB download cap** per file. Files exceeding the cap are skipped and logged in the report. Temporary extraction files are deleted after each target regardless of outcome — only verified files are kept.
 
 ## Rate Limiting
 
-The free VirusTotal API allows **4 requests/minute**. The script enforces a 15-second delay between hashes. Stage 2 makes 2 API calls per hash (file info + execution parents), so total runtime ≈ `(number of hashes × 15) + (number of hashes × 1)` seconds.
-
-If rate limited (HTTP 429), the script automatically waits 60 seconds and retries.
-
-## Notes
-
-- For each found hash, the script extracts the **SHA-256** from the file info response and uses it to query the `execution_parents` endpoint.
-- Stage 2 only processes hashes marked `"found": true` in Stage 1 output, saving API calls.
-- All timestamps are converted to readable UTC format.
-- Not all files have execution parents — `null` is a valid result.
+The free VirusTotal API allows 4 requests/minute. The script enforces a 15-second delay between requests and automatically retries on HTTP 429 after 60 seconds. Stage 2 makes 2 API calls per hash. GitHub code search is rate-limited to 5,000 requests/hour with a token.
 
 ## License
 
