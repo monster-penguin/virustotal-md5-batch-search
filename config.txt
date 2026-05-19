@@ -1,0 +1,19 @@
+[virustotal api]
+-Enter Here-
+
+[github token]
+-Enter Here-
+
+[hybrid analysis api]
+-Enter Here-
+
+[blocklist]
+-user/repository-
+
+[known_binaries]
+-user/repository-
+
+
+[md5s]
+042a0adeff2d616ccfb615a5cd71fde5
+
